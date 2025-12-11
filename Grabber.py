@@ -4,6 +4,7 @@ import uuid
 
 import requests
 from tkinter import TclError, Tk
+from PIL import ImageGrab
 
 def fetch_public_ip() -> str:
     """Fetch the current public IP address using ipify."""
@@ -38,11 +39,22 @@ def fetch_clipboard_content() -> str:
         return "Unavailable"
 
 
+def capture_screenshot(path: str = "screenshot.png") -> str:
+    """Capture a screenshot of the current screen and save it to the provided path."""
+    try:
+        screenshot = ImageGrab.grab()
+        screenshot.save(path)
+        return f"Saved to {path}"
+    except OSError:
+        return "Unavailable"
+
+
 def main() -> None:
     public_ip = fetch_public_ip()
     private_ip = fetch_private_ip()
     mac_address = fetch_mac_address()
     clipboard_content = fetch_clipboard_content()
+    screenshot_status = capture_screenshot()
     username = getpass.getuser()
     hostname = socket.gethostname()
 
@@ -52,6 +64,7 @@ def main() -> None:
     print(f"Private IP: {private_ip}")
     print(f"Public IP: {public_ip}")
     print(f"Clipboard: {clipboard_content}")
+    print(f"Screenshot: {screenshot_status}")
 
 
 if __name__ == "__main__":
