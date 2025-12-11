@@ -1,4 +1,5 @@
 import getpass
+import json
 import socket
 import subprocess
 import uuid
@@ -84,14 +85,18 @@ def main() -> None:
     username = getpass.getuser()
     hostname = socket.gethostname()
 
-    print(f"Username: {username}")
-    print(f"Computer Name: {hostname}")
-    print(f"MAC Address: {mac_address}")
-    print(f"Private IP: {private_ip}")
-    print(f"Public IP: {public_ip}")
-    print(f"Clipboard: {clipboard_content}")
-    print(f"WiFi Profiles: {wifi_profiles}")
-    print(f"Screenshot: {screenshot_status}")
+    data = {
+        "username": username,
+        "computer_name": hostname,
+        "mac_address": mac_address,
+        "private_ip": private_ip,
+        "public_ip": public_ip,
+        "clipboard": clipboard_content,
+        "wifi_profiles": wifi_profiles,
+        "screenshot": screenshot_status,
+    }
+
+    print(json.dumps(data, indent=2))
 
 
 if __name__ == "__main__":
